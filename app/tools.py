@@ -3,12 +3,22 @@ from typing import Dict, Any, Tuple, Optional
 import httpx
 
 DESTRUCTIVE_SQL = re.compile(r"\b(delete|drop|truncate|alter)\b", re.I)
+DDL = re.compile(r"^\s*(drop|alter|truncate|create|rename)\b", re.IGNORECASE)
+DML = re.compile(r"^\s*(insert|update|delete|merge|replace)\b", re.IGNORECASE)
+SELECT = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
+HAS_LIMIT = re.compile(r"\blimit\s+\d+\b", re.IGNORECASE)
 
 def analyze_sql(query: str) -> Dict[str, Any]:
-    q = query.strip()
+    q = (query or "").strip()
     return {
-        "sql_is_destructive": bool(DESTRUCTIVE_SQL.search(q)),
-        "sql_is_select": q.lower().startswith("select"),
+        "sql_query_len": len(q),
+        "is_select": bool(SELECT.search(q)),
+        "has_limit": bool(HAS_LIMIT.search(q)),
+        "has_ddl": bool(DDL.search(q)),
+        "has_dml": bool(DML.search(q)),
+        # optional backward-compat for old keys
+        "sql_is_destructive": bool(DDL.search(q) or DML.search(q)),
+        "sql_is_select": bool(SELECT.search(q)),
     }
 
 def execute_sql_query(args: Dict[str, Any]) -> Dict[str, Any]:

@@ -1,0 +1,31 @@
+# docker-compose.yml (minimal)
+services:
+  policy-gateway:
+    build: .
+    environment:
+      - POLICY_BACKEND=opa
+      - OPA_URL=http://opa:8181
+      - OPA_DECISION_PATH=/v1/data/genai/decision
+      - OPA_TIMEOUT_S=1.5
+      # Optional:
+      # - OPA_ATTACH_BUNDLE_STATUS=true
+    depends_on:
+      - opa
+      - bundle-server
+
+  opa:
+    image: openpolicyagent/opa:latest
+    command: ["run", "--server", "--config-file=/config.yaml"]
+    volumes:
+      - ./opa/config.yaml:/config.yaml:ro
+    ports:
+      - "8181:8181"
+    depends_on:
+      - bundle-server
+
+  bundle-server:
+    image: nginx:alpine
+    volumes:
+      - ./opa/bundles:/usr/share/nginx/html/bundles:ro
+    ports:
+      - "8080:80"

@@ -1,77 +1,216 @@
-import yaml
-from typing import Dict, Any, Optional, List
+# app/policy_engine.py
+from __future__ import annotations
+
+import os
+from typing import Any, Dict, Optional, List
+
+from app.opa_client import OPAClient
+
+
+def _env_mode_default() -> str:
+    mode = os.getenv("POLICY_MODE", "enforce").lower()
+    return mode if mode in ("enforce", "monitor") else "enforce"
+
+
+def _float(v: Any, default: float = 0.0) -> float:
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+
+def _contains_any(text: str, needles: List[str]) -> bool:
+    t = (text or "").lower()
+    return any(n.lower() in t for n in needles)
+
+
+def _sql_query_from_tool(tool: Optional[Any]) -> str:
+    if tool is None:
+        return ""
+    if hasattr(tool, "args"):
+        args = getattr(tool, "args") or {}
+        if isinstance(args, dict):
+            return str(args.get("query", "") or "")
+    if isinstance(tool, dict):
+        args = tool.get("args") or {}
+        if isinstance(args, dict):
+            return str(args.get("query", "") or "")
+    return ""
+
 
 class PolicyEngine:
-    def __init__(self, path="policy.yaml"):
-        self.path = path
-        with open(path) as f:
-            self.policy = yaml.safe_load(f)
-        print(type(self.policy), self.policy.keys())
+    """
+    POLICY_BACKEND=python|opa
+    POLICY_MODE=enforce|monitor
 
+    OPA_FAIL_MODE=closed|open (healthcare recommend: closed)
+    """
 
-    def evaluate(self, text: str, signals: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        signals = signals or {}
-        text_lower = text.lower()
+    def __init__(self):
+        self.backend = os.getenv("POLICY_BACKEND", "python").lower()
+        if self.backend not in ("python", "opa"):
+            self.backend = "python"
 
-        for rule in self.policy["rules"]:
-            cond = rule.get("condition", {})
+        self._opa: Optional[OPAClient] = None
 
-            # 1) contains_any keywords on message
-            keywords = cond.get("contains_any")
-            if keywords and any(k in text_lower for k in keywords):
-                return self._deny(rule)
+        # Python backend thresholds (kept as a fallback if you want)
+        self.inj_block_threshold = _float(os.getenv("INJECTION_BLOCK_THRESHOLD", "0.85"), 0.85)
+        self.inj_safe_completion_threshold = _float(os.getenv("INJECTION_SAFE_COMPLETION_THRESHOLD", "0.35"), 0.35)
+        self.policy_version = os.getenv("POLICY_VERSION", "python-v1")
 
-            # 2) pii_any signal
-            if cond.get("pii_any") is True and signals.get("pii_any") is True:
-                return self._deny(rule)
+        self.opa_attach_bundle_status = os.getenv("OPA_ATTACH_BUNDLE_STATUS", "false").lower() == "true"
+        self.opa_fail_mode = os.getenv("OPA_FAIL_MODE", "closed").lower()  # closed|open
 
-            # 3) injection_score threshold
-            if "injection_score_gte" in cond:
-                thr = float(cond["injection_score_gte"])
-                if float(signals.get("injection_score", 0.0)) >= thr:
-                    return self._deny(rule)
+    def _get_opa(self) -> OPAClient:
+        if self._opa is None:
+            self._opa = OPAClient()
+        return self._opa
 
-            # 4) tool_name match (if specified)
-            if "tool_name" in cond:
-                if signals.get("tool_name") != cond["tool_name"]:
-                    continue
-
-            # 5) domain allowlist check
-            if "domain_not_in" in cond:
-                allowed: List[str] = [d.lower() for d in cond["domain_not_in"]]
-                domain = (signals.get("tool_domain") or "").lower()
-                if domain and domain not in allowed:
-                    return self._deny(rule)
-
-            # 6) sql destructive flag check
-            if "sql_is_destructive" in cond:
-                if bool(signals.get("sql_is_destructive", False)) == bool(cond["sql_is_destructive"]):
-                    # proceed to role check if any
-                    pass
-                else:
-                    continue
-
-            # 7) role restriction
-            if "user_role_not_in" in cond:
-                blocked_roles = set([r.lower() for r in cond["user_role_not_in"]])
-                if (signals.get("user_role") or "").lower() in blocked_roles:
-                    # role is blocked => deny (but condition says "not in", so invert)
-                    continue
-                # role NOT in blocked list => ok to keep evaluating other rules
-                # (For this rule, other constraints already matched, so deny now)
-                return self._deny(rule)
-
+    def _decision(
+        self,
+        *,
+        decision: str,
+        action: str,
+        reason: str,
+        rule_id: str,
+        mode: Optional[str] = None,
+        obligations: Optional[List[str]] = None,
+        policy_version: Optional[str] = None,
+    ) -> Dict[str, Any]:
         return {
-            "decision": "allow",
-            "rule_id": None,
-            "reason": "No policy violations",
-            "policy_version": self.policy["version"],
+            "decision": decision,
+            "action": action,
+            "reason": reason,
+            "rule_id": rule_id,
+            "policy_version": policy_version or self.policy_version,
+            "mode": mode or _env_mode_default(),
+            "obligations": obligations or [],
         }
 
-    def _deny(self, rule: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "decision": "deny",
-            "rule_id": rule["id"],
-            "reason": rule["message"],
-            "policy_version": self.policy["version"],
+    # -------------------------
+    # Python fallback (optional)
+    # -------------------------
+    def evaluate(self, message: str, signals: Dict[str, Any]) -> Dict[str, Any]:
+        stage = (signals.get("stage") or "pre").lower()
+        mode = _env_mode_default()
+
+        inj_score = _float(signals.get("injection_score"), 0.0)
+        hits = signals.get("injection_hits") or []
+        pii_any = bool(signals.get("pii_any", False))
+
+        if stage == "pre":
+            if hits and inj_score >= self.inj_safe_completion_threshold:
+                return self._decision(
+                    decision="allow",
+                    action="safe_completion",
+                    reason="Injection signals present; safe completion",
+                    rule_id="PY_INJ_SAFE_COMPLETION",
+                    mode=mode,
+                    obligations=["log_injection"],
+                )
+            if pii_any:
+                return self._decision(
+                    decision="allow",
+                    action="redact_and_allow",
+                    reason="PII detected; redact",
+                    rule_id="PY_PII_REDACT",
+                    mode=mode,
+                    obligations=["log_pii_redaction"],
+                )
+
+        # Minimal tool rule in python fallback
+        if stage == "tool" and signals.get("tool_name") == "sql_query":
+            q = _sql_query_from_tool(signals.get("tool"))
+            if any(k in q.lower() for k in ["drop ", "delete ", "truncate ", "alter "]):
+                return self._decision(
+                    decision="deny",
+                    action="deny",
+                    reason="Destructive SQL blocked (python fallback)",
+                    rule_id="PY_SQL_BLOCK",
+                    mode=mode,
+                    obligations=["log_security_event"],
+                )
+
+        return self._decision(
+            decision="allow",
+            action="allow",
+            reason="Allowed",
+            rule_id="PY_DEFAULT_ALLOW",
+            mode=mode,
+        )
+
+    # -------------------------
+    # Stage-aware wrapper
+    # -------------------------
+    def evaluate_stage(
+        self,
+        stage: str,
+        message: str,
+        signals: Dict[str, Any],
+        tool: Optional[Any],
+        tool_result: Optional[Any],
+        llm_out: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        opa_input: Dict[str, Any] = {
+            "stage": stage,
+            "request": {
+                "message": message,
+                "user_role": signals.get("user_role"),
+            },
+            "signals": {
+                **signals,
+                # helps rego reliably know current mode without env access
+                "policy_mode_default": _env_mode_default(),
+            },
+            "tool": None if tool is None else {"name": getattr(tool, "name", None), "args": getattr(tool, "args", None)},
+            "tool_result": tool_result,
+            "llm_out": llm_out,
         }
+        print("**169",self.backend)
+        self.backend = "opa"
+        if self.backend == "opa":
+            try:
+                result = self._get_opa().decide(opa_input)
+
+                if self.opa_attach_bundle_status:
+                    try:
+                        status = self._get_opa().bundle_status()
+                        result = {**result, "opa": {"status_hash": OPAClient.stable_hash(status), "status": status}}
+                    except Exception:
+                        result = {**result, "opa": {"status_error": True}}
+
+                return {
+                    "decision": result.get("decision", "deny"),
+                    "action": result.get("action") or ("deny" if result.get("decision") == "deny" else "allow"),
+                    "reason": result.get("reason", "Denied by OPA policy"),
+                    "rule_id": result.get("rule_id"),
+                    "policy_version": result.get("policy_version", "opa-v1"),
+                    "mode": result.get("mode", _env_mode_default()),
+                    "obligations": result.get("obligations", []),
+                }
+
+            except Exception as e:
+                # Healthcare-safe default: fail CLOSED
+                if self.opa_fail_mode == "open":
+                    return self._decision(
+                        decision="allow",
+                        action="allow",
+                        reason=f"OPA unavailable (fail-open): {type(e).__name__}",
+                        rule_id="OPA_FAIL_OPEN",
+                        policy_version="opa-unavailable",
+                    )
+                return self._decision(
+                    decision="deny",
+                    action="deny",
+                    reason=f"OPA unavailable (fail-closed): {type(e).__name__}",
+                    rule_id="OPA_FAIL_CLOSED",
+                    policy_version="opa-unavailable",
+                )
+
+        # Python fallback
+        stage_signals = dict(signals)
+        stage_signals["stage"] = stage
+        stage_signals["tool"] = None if tool is None else {"name": getattr(tool, "name", None), "args": getattr(tool, "args", None)}
+        if llm_out and isinstance(llm_out, dict):
+            stage_signals["llm_text"] = llm_out.get("output_text") or llm_out.get("text") or ""
+        return self.evaluate(message, signals=stage_signals)

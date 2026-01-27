@@ -1,0 +1,25 @@
+fastapi>=0.110.0
+uvicorn>=0.27.0
+PyYAML>=6.0
+prometheus-client>=0.20.0
+httpx>=0.27.0
+openai>=1.0.0
+python-dotenv>=1.0.0
+requests
+fastapi
+
+guardrails-ai
+
+# DetectPII uses Microsoft Presidio (+ spaCy model)
+presidio-analyzer
+presidio-anonymizer
+spacy
+
+# RegexMatch validator dependency
+rstr
+
+# GroundedAIHallucination validator deps (big!)
+torch
+transformers
+peft
+jinja2

@@ -1,0 +1,24 @@
+version: "2026-01-10.2"
+mode: "enforce"
+
+rules:
+  - id: SQL_DESTRUCTIVE_BLOCK
+    description: Block destructive SQL
+    condition:
+      contains_any: ["delete", "drop", "truncate"]
+    action: deny
+    message: "Destructive SQL queries are not allowed"
+
+  - id: PII_BLOCK
+    description: Block requests containing PII
+    condition:
+      pii_any: true
+    action: deny
+    message: "PII detected in request; not allowed in this context"
+
+  - id: INJECTION_BLOCK
+    description: Block high-risk prompt injection attempts
+    condition:
+      injection_score_gte: 0.6
+    action: deny
+    message: "Prompt injection risk detected; request blocked"

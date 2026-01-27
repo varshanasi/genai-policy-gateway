@@ -1,0 +1,15 @@
+// opa/bundle/data.json
+{
+  "policy": {
+    "version": "bundle-v0.1.0",
+    "mode": "enforce"
+  },
+  "tool_allowlist": {
+    "http_get_domains": {
+      "cdc.gov": true,
+      "www.cdc.gov": true,
+      "nih.gov": true,
+      "www.nih.gov": true
+    }
+  }
+}

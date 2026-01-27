@@ -1,0 +1,8 @@
+decision_logs:
+  console: true
+
+status:
+  console: true
+
+logging:
+  level: info

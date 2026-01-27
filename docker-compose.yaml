@@ -1,0 +1,44 @@
+version: "3.9"
+
+services:
+  policy-gateway:
+    build:
+      context: ./app  # Build context is now the app directory
+      dockerfile: Dockerfile  # Dockerfile is inside the app directory
+    environment:
+      POLICY_BACKEND: opa
+      OPA_URL: http://opa:8181
+      OPA_DECISION_PATH: /v1/data/genai/decision
+      OPA_TIMEOUT_S: "1.5"
+      # NEMO_HEURISTICS_URL: http://nemo-heuristics:1337/heuristics
+    depends_on:
+      - opa
+      - bundle-server
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  opa:
+    image: openpolicyagent/opa:latest
+    command: ["run", "--server", "--addr=0.0.0.0:8181", "--config-file=/config.yaml"]
+    volumes:
+      - ./opa/config.yaml:/config.yaml:ro
+    ports:
+      - "8181:8181"
+    depends_on:
+      - bundle-server
+    restart: unless-stopped
+
+  bundle-server:
+    image: nginx:alpine
+    volumes:
+      - ./opa/bundles:/usr/share/nginx/html/bundles:ro
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+  # nemo-heuristics:
+  #   build: ./nemo-heuristics
+  #   restart: unless-stopped
+  #   ports:
+  #     - "1337:1337"

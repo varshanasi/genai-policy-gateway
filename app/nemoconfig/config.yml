@@ -1,0 +1,17 @@
+models:
+  - type: main
+    engine: openai
+    model: gpt-4o-mini
+
+rails:
+  input:
+    flows:
+      - jailbreak detection heuristics
+
+  config:
+    jailbreak_detection:
+      # Explicitly set the model to gpt-4o-mini
+      model_id: gpt-4o-mini
+      # leaving server_endpoint unset => runs locally/in-process
+      length_per_perplexity_threshold: 89.79
+      prefix_suffix_per_perplexity_threshold: 1845.65

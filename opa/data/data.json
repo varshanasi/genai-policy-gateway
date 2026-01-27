@@ -1,0 +1,13 @@
+{
+    "genai": {
+      "http_allow_domains": ["cdc.gov", "www.cdc.gov", "nih.gov", "www.nih.gov"],
+      "thresholds": {
+        "inj_block": 0.85,
+        "inj_safe_completion": 0.35
+      },
+      "sql": {
+        "require_limit_on_select": true
+      }
+    }
+  }
+  
